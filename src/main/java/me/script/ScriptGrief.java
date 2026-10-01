@@ -117,7 +117,7 @@ public class ScriptGrief extends JavaPlugin {
     }
 
     private void set(List<Saved> log, Block b, Material m) {
-        if (b.getType() == m || b.getType() == Material.BEDROCK) return;
+        if (b.getType() == m || b.getType() == Material.BEDROCK || b.getY() < b.getWorld().getMinHeight() || b.getY() >= b.getWorld().getMaxHeight()) return;
         log.add(new Saved(b, b.getBlockData()));
         b.setType(m, false);
     }
@@ -189,41 +189,136 @@ public class ScriptGrief extends JavaPlugin {
         }, 1);
     }
 
-    // Aftermath of a big PvP fight (denser near you)
+    // ---------- fight: separate skirmish sites, each with its own block palette ----------
+    private static final Material[] PAL = {Material.COBBLESTONE, Material.OAK_PLANKS, Material.SPRUCE_PLANKS, Material.DIRT,
+            Material.NETHERRACK, Material.COBBLED_DEEPSLATE, Material.STONE, Material.WHITE_WOOL, Material.RED_WOOL,
+            Material.SANDSTONE, Material.END_STONE, Material.OAK_LOG};
+
     private void fight(World w, int cx, int cz, List<Saved> log) {
-        Material[] blocks = {Material.COBBLESTONE, Material.OAK_PLANKS, Material.STONE_BRICKS, Material.DIRT, Material.NETHERRACK, Material.COBBLED_DEEPSLATE};
-        Material[] broken = {Material.OAK_FENCE, Material.COBBLESTONE_WALL, Material.OAK_SLAB, Material.STONE_BRICK_STAIRS,
-                Material.IRON_BARS, Material.COBBLESTONE_SLAB, Material.CRACKED_STONE_BRICKS, Material.OAK_TRAPDOOR, Material.TNT};
-        rows(cx, cz, (x, z) -> {
-            int y = top(w, x, z);
-            if (!w.getBlockAt(x, y, z).getType().isSolid()) return;
-            Block a = w.getBlockAt(x, y + 1, z);
-            if (!a.getType().isAir()) return;
-            int dx = x - cx, dz = z - cz, m = dx * dx + dz * dz < 400 ? 3 : 1;
-            int k = r.nextInt(1000);
-            if (k < 40 * m) {                       // cobwebs
-                set(log, a, Material.COBWEB);
-                if (r.nextBoolean()) set(log, w.getBlockAt(x, y + 2, z), Material.COBWEB);
-            } else if (k < 60 * m) {                // panic-placed pillars
-                for (int h = 1; h <= 1 + r.nextInt(3); h++) set(log, w.getBlockAt(x, y + h, z), blocks[r.nextInt(blocks.length)]);
-            } else if (k < 75 * m) {                // broken things
-                set(log, a, broken[r.nextInt(broken.length)]);
-            } else if (k < 85 * m) {                // small craters
-                int rad = 1 + r.nextInt(2);
-                for (int i = -rad; i <= rad; i++) for (int j = -rad; j <= rad; j++) for (int h = -rad; h <= rad; h++)
-                    if (i * i + j * j + h * h <= rad * rad) set(log, w.getBlockAt(x + i, y + h, z + j), Material.AIR);
-            } else if (k < 100 * m) {               // obsidian
-                for (int h = 1; h <= 1 + r.nextInt(2); h++) set(log, w.getBlockAt(x, y + h, z), Material.OBSIDIAN);
-            } else if (k < 130 * m) {               // loot on ground
-                w.dropItem(new Location(w, x + 0.5, y + 1, z + 0.5), randItem());
-            } else if (k < 134 * m) {               // chests
-                set(log, a, Material.CHEST);
-                if (a.getState() instanceof Container c)
-                    for (int i = 0, n = 3 + r.nextInt(6); i < n; i++) c.getInventory().setItem(r.nextInt(27), randItem());
-            } else if (k < 137 * m) {               // ender chests
-                set(log, a, Material.ENDER_CHEST);
+        int[] box = {cx - HALF + 3, cz - HALF + 3, cx + HALF - 3, cz + HALF - 3};
+        List<int[]> sc = new ArrayList<>();
+        sc.add(new int[]{cx, cz, 14, 9}); // main brawl on you
+        for (int i = 0; i < 7; i++)
+            sc.add(new int[]{cx - 38 + r.nextInt(77), cz - 38 + r.nextInt(77), 7 + r.nextInt(6), 3 + r.nextInt(3)});
+        int[] i = {0};
+        start(() -> {
+            int[] s = sc.get(i[0]);
+            scene(w, s[0], s[1], s[2], s[3], box, log);
+            return ++i[0] >= sc.size();
+        }, 2);
+    }
+
+    private void scene(World w, int cx, int cz, int rad, int parts, int[] box, List<Saved> log) {
+        Material m1 = PAL[r.nextInt(PAL.length)];
+        Material[] pal = {m1, r.nextInt(3) == 0 ? PAL[r.nextInt(PAL.length)] : m1};
+        for (int p = 0; p < parts + 2; p++) {
+            int x = Math.max(box[0], Math.min(box[2], cx + (int) (r.nextGaussian() * rad / 2.5)));
+            int z = Math.max(box[1], Math.min(box[3], cz + (int) (r.nextGaussian() * rad / 2.5)));
+            if (!w.getBlockAt(x, top(w, x, z), z).getType().isSolid()) continue;
+            if (p >= parts) { pile(w, x, z, log); continue; } // loot always lands around the scene
+            switch (r.nextInt(9)) {
+                case 0 -> webs(w, x, z, log);
+                case 1 -> tower(w, x, z, pal, log);
+                case 2 -> { int d[] = dir(); int y = top(w, x, z) + 1 + r.nextInt(3);
+                    set(log, w.getBlockAt(x, y, z), pal[0]); line(w, x, z, d[0], d[1], 6 + r.nextInt(9), pal, 0.1, y, log); }
+                case 3 -> bunker(w, x, z, log);
+                case 4 -> wall(w, x, z, pal, log);
+                case 5 -> crater(w, x, z, log);
+                case 6 -> pit(w, x, z, log);
+                case 7 -> pile(w, x, z, log);
+                default -> { int d[] = dir(); line(w, x, z, d[0], d[1], 6 + r.nextInt(8), pal, 0.5, null, log); }
             }
-        });
+        }
+    }
+
+    private int[] dir() {
+        int dx = r.nextInt(3) - 1, dz = r.nextInt(3) - 1;
+        if (dx == 0 && dz == 0) dx = 1;
+        return new int[]{dx, dz};
+    }
+
+    /** wobbly line of blocks with gaps; fy == null means follow the ground */
+    private void line(World w, int x, int z, int dx, int dz, int len, Material[] pal, double gap, Integer fy, List<Saved> log) {
+        for (int t = 0; t < len; t++) {
+            x += dx; z += dz;
+            if (r.nextInt(100) < 15) { if (dx != 0) z += r.nextBoolean() ? 1 : -1; else x += r.nextBoolean() ? 1 : -1; }
+            if (r.nextDouble() < gap) continue;
+            int y = fy != null ? fy : top(w, x, z) + 1;
+            set(log, w.getBlockAt(x, y, z), pal[r.nextInt(pal.length)]);
+        }
+    }
+
+    private void webs(World w, int x, int z, List<Saved> log) {
+        int y = top(w, x, z) + 1, rad = 2 + r.nextInt(3);
+        for (int dx = -rad; dx <= rad; dx++) for (int dz = -rad; dz <= rad; dz++) for (int dy = 0; dy <= rad; dy++) {
+            double d = Math.sqrt(dx * dx + dz * dz + dy * dy);
+            Block b = w.getBlockAt(x + dx, y + dy, z + dz);
+            if (d <= rad && b.getType().isAir() && r.nextDouble() < 0.5 * (1 - d / (rad + 1)) + 0.1) set(log, b, Material.COBWEB);
+        }
+    }
+
+    private void tower(World w, int x, int z, Material[] pal, List<Saved> log) {
+        int y = top(w, x, z), h = 4 + r.nextInt(10);
+        for (int k = 1; k <= h; k++) set(log, w.getBlockAt(x, y + k, z), pal[r.nextInt(pal.length)]);
+        if (r.nextInt(3) == 0) { int d[] = dir(); line(w, x, z, d[0], d[1], 5 + r.nextInt(9), pal, 0.12, y + h, log); }
+    }
+
+    private void bunker(World w, int x, int z, List<Saved> log) {
+        for (int dx = -2; dx <= 2; dx++) for (int dz = -2; dz <= 2; dz++) {
+            if (Math.max(Math.abs(dx), Math.abs(dz)) != 2) continue;
+            int y = top(w, x + dx, z + dz);
+            for (int k = 1; k <= 1 + r.nextInt(2); k++)
+                if (r.nextInt(100) < 80) set(log, w.getBlockAt(x + dx, y + k, z + dz), Material.OBSIDIAN);
+        }
+        int y = top(w, x, z) + 1;
+        if (r.nextBoolean()) set(log, w.getBlockAt(x, y, z), Material.ENDER_CHEST); else chest(w, x, y, z, log);
+    }
+
+    private void wall(World w, int x, int z, Material[] pal, List<Saved> log) {
+        boolean ew = r.nextBoolean();
+        for (int i = 0; i < 3 + r.nextInt(4); i++) {
+            int bx = x + (ew ? i : 0), bz = z + (ew ? 0 : i), y = top(w, bx, bz);
+            for (int k = 1; k <= 2; k++) if (r.nextInt(100) < 75) set(log, w.getBlockAt(bx, y + k, bz), pal[r.nextInt(pal.length)]);
+        }
+        if (r.nextBoolean()) set(log, w.getBlockAt(x + (ew ? 1 : 2), top(w, x + (ew ? 1 : 2), z + (ew ? 2 : 1)) + 1, z + (ew ? 2 : 1)), Material.COBWEB);
+    }
+
+    private void crater(World w, int x, int z, List<Saved> log) {
+        int y = top(w, x, z), rad = 3 + r.nextInt(3);
+        for (int dx = -rad - 1; dx <= rad + 1; dx++) for (int dy = -rad - 1; dy <= rad + 1; dy++) for (int dz = -rad - 1; dz <= rad + 1; dz++) {
+            double lim = rad + r.nextDouble() * 1.2 - 0.6;
+            if (Math.sqrt(dx * dx + dy * dy + dz * dz) <= lim) set(log, w.getBlockAt(x + dx, y + dy, z + dz), Material.AIR);
+        }
+        for (int dx = -rad - 3; dx <= rad + 3; dx++) for (int dz = -rad - 3; dz <= rad + 3; dz++) {
+            double d = Math.sqrt(dx * dx + dz * dz);
+            if (d <= rad || d >= rad + 3 || r.nextInt(100) >= 40) continue;
+            Block b = w.getBlockAt(x + dx, top(w, x + dx, z + dz), z + dz);
+            if (b.getType().isSolid()) set(log, b, r.nextBoolean() ? Material.COARSE_DIRT : r.nextInt(3) == 0 ? Material.BLACKSTONE : Material.NETHERRACK);
+        }
+        if (r.nextInt(3) == 0) {
+            set(log, w.getBlockAt(x, y - rad + 1, z), Material.LAVA);
+            set(log, w.getBlockAt(x + 1, y - rad + 1, z), Material.OBSIDIAN);
+        }
+    }
+
+    private void pit(World w, int x, int z, List<Saved> log) {
+        int y = top(w, x, z);
+        for (int k = 0; k <= 3; k++) set(log, w.getBlockAt(x, y - k, z), Material.AIR);
+        if (r.nextBoolean()) set(log, w.getBlockAt(x, y - 3, z), Material.COBWEB);
+    }
+
+    private void pile(World w, int x, int z, List<Saved> log) {
+        int y = top(w, x, z) + 1;
+        for (int i = 0, n = 2 + r.nextInt(5); i < n; i++)
+            w.dropItem(new Location(w, x + 0.5 + r.nextGaussian(), y + 1, z + 0.5 + r.nextGaussian()), randItem());
+        if (r.nextInt(3) == 0) chest(w, x + 1, top(w, x + 1, z) + 1, z, log);
+    }
+
+    private void chest(World w, int x, int y, int z, List<Saved> log) {
+        Block b = w.getBlockAt(x, y, z);
+        set(log, b, Material.CHEST);
+        if (b.getState() instanceof Container c)
+            for (int i = 0, n = 3 + r.nextInt(6); i < n; i++) c.getInventory().setItem(r.nextInt(27), randItem());
     }
 
     private ItemStack randItem() {
