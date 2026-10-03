@@ -11,11 +11,48 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.FishHook;
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.entity.ThrownPotion;
+import org.bukkit.event.Event;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.player.PlayerFishEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.ItemFlag;
+import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.MusicInstrumentMeta;
+import org.bukkit.inventory.meta.PotionMeta;
+import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.util.RayTraceResult;
+import org.bukkit.util.Vector;
+
 import java.util.*;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 
-public class ScriptGrief extends JavaPlugin {
+public class ScriptGrief extends JavaPlugin implements Listener {
+    private static final List<String> ITEMS = List.of("pot_horn", "pot_rod", "sonic_horn", "sonic_rod");
+    private static final MusicInstrument[] HORNS = {MusicInstrument.PONDER, MusicInstrument.SING, MusicInstrument.SEEK,
+            MusicInstrument.FEEL, MusicInstrument.ADMIRE, MusicInstrument.CALL, MusicInstrument.YEARN, MusicInstrument.DREAM};
+    private static final double SONIC_DAMAGE = 10.0; // 5 hearts per boom
+    private NamespacedKey key;
+    private final Set<UUID> busy = new HashSet<>();
+
+    @Override
+    public void onEnable() {
+        key = new NamespacedKey(this, "item");
+        getServer().getPluginManager().registerEvents(this, this);
+    }
+
     private static final int HALF = 50; // 100x100 area
     private static final List<String> TYPES = List.of("tnt", "used", "base", "fire", "lava", "flood", "flat", "nether", "fight");
     private final Random r = new Random();
@@ -28,10 +65,20 @@ public class ScriptGrief extends JavaPlugin {
     public boolean onCommand(CommandSender s, Command c, String l, String[] a) {
         if (!(s instanceof Player p)) { s.sendMessage("Players only."); return true; }
         if (!p.hasPermission("script.use")) { p.sendMessage("§cNo permission."); return true; }
-        if (a.length == 0) { p.sendMessage("§e/script spawn destroy <type> | undo | stop | list"); return true; }
+        if (a.length == 0) { p.sendMessage("§e/script spawn destroy <type> | undo | stop | list | give <player> <item>"); return true; }
         UUID id = p.getUniqueId();
         switch (a[0].toLowerCase()) {
             case "list" -> p.sendMessage("§eTypes: §f" + String.join(", ", TYPES));
+            case "give" -> {
+                if (a.length < 3 || !ITEMS.contains(a[2].toLowerCase())) {
+                    p.sendMessage("§eUsage: /script give <player> <" + String.join("|", ITEMS) + ">");
+                    return true;
+                }
+                Player t = Bukkit.getPlayerExact(a[1]);
+                if (t == null) { p.sendMessage("§cPlayer not online."); return true; }
+                t.getInventory().addItem(make(a[2].toLowerCase())).values().forEach(it -> t.getWorld().dropItem(t.getLocation(), it));
+                p.sendMessage("§aGave " + a[2].toLowerCase() + " to " + t.getName());
+            }
             case "stop" -> {
                 tasks.forEach(BukkitTask::cancel);
                 int n = tasks.size(); tasks.clear();
@@ -94,16 +141,18 @@ public class ScriptGrief extends JavaPlugin {
                 }
                 p.sendMessage("§aDestroying area (" + a[2].toLowerCase() + ")... /script undo reverts it.");
             }
-            default -> p.sendMessage("§e/script spawn destroy <type> | undo | stop | list");
+            default -> p.sendMessage("§e/script spawn destroy <type> | undo | stop | list | give <player> <item>");
         }
         return true;
     }
 
     @Override
     public List<String> onTabComplete(CommandSender s, Command c, String l, String[] a) {
-        if (a.length == 1) return List.of("spawn", "undo", "stop", "list");
+        if (a.length == 1) return List.of("spawn", "undo", "stop", "list", "give");
         if (a.length == 2 && a[0].equalsIgnoreCase("spawn")) return List.of("destroy");
         if (a.length == 3 && a[0].equalsIgnoreCase("spawn")) return TYPES;
+        if (a.length == 2 && a[0].equalsIgnoreCase("give")) return Bukkit.getOnlinePlayers().stream().map(Player::getName).toList();
+        if (a.length == 3 && a[0].equalsIgnoreCase("give")) return ITEMS;
         return List.of();
     }
 
@@ -364,5 +413,156 @@ public class ScriptGrief extends JavaPlugin {
                 }
             }
         set(log, w.getBlockAt(x0 + 3, y + 1, z0 + 3), Material.CHEST);
+    }
+
+    // ---------- custom items ----------
+    private ItemStack make(String id) {
+        boolean horn = id.endsWith("horn");
+        ItemStack it = new ItemStack(horn ? Material.GOAT_HORN : Material.FISHING_ROD);
+        ItemMeta m = it.getItemMeta();
+        m.setDisplayName(switch (id) {
+            case "pot_horn" -> "§d§lPot Horn";
+            case "pot_rod" -> "§d§lPot Rod";
+            case "sonic_horn" -> "§3§lSonic Horn";
+            default -> "§3§lSonic Rod";
+        });
+        m.setLore(List.of(id.startsWith("pot") ? "§7Pots rain on the target after 3s" : "§73 sonic booms from above",
+                horn ? "§7Silent. No cooldown." : "§7Breaks when the bobber lands."));
+        Enchantment glint = Enchantment.getByKey(NamespacedKey.minecraft("lure"));
+        if (glint != null) { m.addEnchant(glint, 1, true); m.addItemFlags(ItemFlag.HIDE_ENCHANTS); }
+        m.getPersistentDataContainer().set(key, PersistentDataType.STRING, id);
+        if (m instanceof MusicInstrumentMeta mi)
+            mi.setInstrument(id.equals("pot_horn") ? MusicInstrument.YEARN : HORNS[r.nextInt(HORNS.length)]);
+        it.setItemMeta(m);
+        return it;
+    }
+
+    private String id(ItemStack it) {
+        if (it == null || !it.hasItemMeta()) return null;
+        return it.getItemMeta().getPersistentDataContainer().get(key, PersistentDataType.STRING);
+    }
+
+    private String held(Player p, String suffix) {
+        PlayerInventory inv = p.getInventory();
+        for (ItemStack it : new ItemStack[]{inv.getItemInMainHand(), inv.getItemInOffHand()}) {
+            String id = id(it);
+            if (id != null && id.endsWith(suffix)) return id;
+        }
+        return null;
+    }
+
+    private void later(int ticks, Runnable run) {
+        Bukkit.getScheduler().runTaskLater(this, run, ticks);
+    }
+
+    @EventHandler
+    public void onUse(PlayerInteractEvent e) {
+        if (e.getAction() != Action.RIGHT_CLICK_AIR && e.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        String id = id(e.getItem());
+        if (id == null || !id.endsWith("horn")) return;
+        e.setUseItemInHand(Event.Result.DENY); // vanilla horn never plays, no cooldown is applied
+        Player p = e.getPlayer();
+        if (e.getClickedBlock() != null && e.getClickedBlock().getType().isInteractable() && !p.isSneaking()) return;
+        if (id.equals("pot_horn")) {
+            p.sendMessage("§dPots in 3s...");
+            later(60, () -> { if (p.isOnline() && !p.isDead()) pots(p.getEyeLocation().add(0, 0.4, 0)); });
+        } else {
+            Location eye = p.getEyeLocation();
+            RayTraceResult rt = p.getWorld().rayTraceEntities(eye, eye.getDirection(), 40, 0.4, en -> en instanceof LivingEntity && en != p);
+            if (rt != null && rt.getHitEntity() != null) sonic(p, rt.getHitEntity(), rt.getHitEntity().getLocation());
+            else {
+                Vector d = eye.getDirection().setY(0);
+                if (d.lengthSquared() < 1e-4) d = new Vector(0, 0, 1);
+                sonic(p, null, p.getLocation().add(d.normalize().multiply(5)));
+            }
+        }
+    }
+
+    @EventHandler
+    public void onFish(PlayerFishEvent e) {
+        Player p = e.getPlayer();
+        String id = held(p, "rod");
+        if (id == null) return;
+        if (e.getState() == PlayerFishEvent.State.FISHING) {
+            if (busy.contains(p.getUniqueId())) { e.setCancelled(true); return; }
+            rod(p, id, e.getHook());
+        } else if (e.getState() == PlayerFishEvent.State.CAUGHT_FISH) e.setCancelled(true);
+    }
+
+    /** follows the bobber; once it lands the rod breaks and the effect fires at that spot */
+    private void rod(Player p, String id, FishHook hook) {
+        busy.add(p.getUniqueId());
+        Location[] last = {hook.getLocation()};
+        int[] t = {0};
+        new BukkitRunnable() {
+            public void run() {
+                t[0]++;
+                boolean alive = hook.isValid();
+                if (alive) last[0] = hook.getLocation();
+                boolean landed = !alive || t[0] > 100 || hook.getHookedEntity() != null || hook.isInWater()
+                        || hook.isOnGround() || (t[0] > 6 && hook.getVelocity().lengthSquared() < 0.002);
+                if (!landed) return;
+                cancel();
+                Entity hooked = alive ? hook.getHookedEntity() : null;
+                consume(p, id);
+                hook.remove();
+                busy.remove(p.getUniqueId());
+                Location at = last[0];
+                if (id.equals("pot_rod")) later(60, () -> pots(at.clone().add(0, 1, 0)));
+                else sonic(p, hooked, at);
+            }
+        }.runTaskTimer(this, 1L, 1L);
+    }
+
+    private void consume(Player p, String id) {
+        PlayerInventory inv = p.getInventory();
+        List<Integer> slots = new ArrayList<>(List.of(inv.getHeldItemSlot(), 40));
+        for (int i = 0; i < 36; i++) slots.add(i);
+        for (int i : slots) {
+            ItemStack it = inv.getItem(i);
+            if (id.equals(id(it))) {
+                if (it.getAmount() > 1) it.setAmount(it.getAmount() - 1); else inv.setItem(i, null);
+                return;
+            }
+        }
+    }
+
+    private PotionEffect pe(String k, int ticks, int amp) {
+        return new PotionEffect(PotionEffectType.getByKey(NamespacedKey.minecraft(k)), ticks, amp);
+    }
+
+    /** instant health II, regeneration I (1:30), strength II (1:30), speed I (8:00) */
+    private void pots(Location at) {
+        PotionEffect[] fx = {pe("instant_health", 1, 1), pe("regeneration", 1800, 0), pe("strength", 1800, 1), pe("speed", 9600, 0)};
+        for (PotionEffect e : fx)
+            at.getWorld().spawn(at, ThrownPotion.class, tp -> {
+                ItemStack st = new ItemStack(Material.SPLASH_POTION);
+                PotionMeta pm = (PotionMeta) st.getItemMeta();
+                pm.addCustomEffect(e, true);
+                pm.setColor(e.getType().getColor());
+                st.setItemMeta(pm);
+                tp.setItem(st);
+                tp.setVelocity(new Vector(0, -0.4, 0));
+            });
+    }
+
+    /** 3 warden sonic booms coming down from above; follows the target if there is one */
+    private void sonic(Player p, Entity target, Location base) {
+        World w = base.getWorld();
+        for (int n = 0; n < 3; n++)
+            for (int i = 0; i <= 5; i++) {
+                int ii = i;
+                later(n * 12 + i, () -> {
+                    Location at = target != null && target.isValid() ? target.getLocation() : base;
+                    w.spawnParticle(Particle.SONIC_BOOM, at.clone().add(0, 8 - 1.4 * ii, 0), 1);
+                    if (ii < 5) return;
+                    w.playSound(at, "entity.warden.sonic_boom", SoundCategory.HOSTILE, 2f, 1f);
+                    for (Entity en : w.getNearbyEntities(at.clone().add(0, 1, 0), 2, 2, 2))
+                        if (en instanceof LivingEntity le && en != p && !(en instanceof ArmorStand)) {
+                            le.setNoDamageTicks(0);
+                            le.damage(SONIC_DAMAGE, p);
+                        }
+                });
+            }
     }
 }
